@@ -69,7 +69,7 @@ class BLEFileTransferManager: NSObject, ObservableObject {
     
     private var fileData = Data()
     private var transferState: UInt8 = 0 // 0: IDLE, 1: IN_PROGRESS
-    private var chunkSize: Int = 20
+    private var chunkSize: Int = 180
     
     // MARK: - Initialization
     override init() {
@@ -94,6 +94,8 @@ class BLEFileTransferManager: NSObject, ObservableObject {
     
     func connect(to peripheral: CBPeripheral) {
         self.peripheral = peripheral
+        let maxLength = peripheral.maximumWriteValueLength(for: .withoutResponse)
+        print("Max length: \(maxLength)")
         centralManager.connect(peripheral, options: nil)
     }
     
@@ -138,6 +140,19 @@ class BLEFileTransferManager: NSObject, ObservableObject {
         print("==> FInal: \(dataFinal)")
         
         return nil
+        
+        // save file to local
+//        state = .saving
+//        let fileURL = FileManager.default.temporaryDirectory.appendingPathComponent(fileName)
+//            
+//        do {
+//            try fileData.write(to: fileURL)
+//            transferCompletedFiles.append(fileURL)
+//            return fileURL
+//        } catch {
+//            state = .error("Failed to save file: \(error.localizedDescription)")
+//            return nil
+//        }
     }
 }
 
@@ -148,8 +163,8 @@ extension BLEFileTransferManager {
             state = .error("BLE Not Connected!")
             return
         }
-
-//        
+   
+//
 //        // Reset transfer state
 //        fileData = Data()
 //        currentChunk = 0
@@ -210,6 +225,7 @@ extension BLEFileTransferManager: CBCentralManagerDelegate {
         connectedDevice?.delegate = self
         connectedDevice?.discoverServices([BLEConstants.serviceUUID])
         print("Connected to \(peripheral.name ?? "unknown device")")
+        print("Max: \(connectedDevice!.maximumWriteValueLength(for: .withoutResponse)) - \(connectedDevice!.maximumWriteValueLength(for: .withResponse))")
     }
     
     func centralManager(_ central: CBCentralManager, didFailToConnect peripheral: CBPeripheral, error: Error?) {
@@ -362,7 +378,7 @@ extension BLEFileTransferManager: CBPeripheralDelegate {
             fileSize = Int(UInt32(littleEndian: fileSizeData.withUnsafeBytes { $0.load(as: UInt32.self) }))
             
             // Calculate total chunks
-            totalChunks = Int((fileSize + 19) / 20)  // Chunk size is 20 bytes
+            totalChunks = Int((fileSize + chunkSize - 1) / chunkSize)  // Chunk size is 20 bytes
             
             currentChunk = 0
             fileData = Data()
