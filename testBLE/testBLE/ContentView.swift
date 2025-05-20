@@ -4,27 +4,26 @@ import CoreBluetooth
 
 // MARK: - BLE Constants
 struct BLEConstants {
-    static let serviceUUID = CBUUID(string: "FFE0")
+    static let fileTransferServiceUUID = CBUUID(string: "FFE0")
     static let fileControlCharUUID = CBUUID(string: "FFE6")
     static let fileInfoCharUUID = CBUUID(string: "FFE7")
     static let fileDataCharUUID = CBUUID(string: "FFE8")
     static let fileAckCharUUID = CBUUID(string: "FFE9")
     static let fileErrCharUUID = CBUUID(string: "FFEA")
-        
+    
 }
 
 // MARK: - File Command Codes
 enum FileCommand: UInt8 {
-    case startTransfer = 0x01
-    case abortTransfer = 0x02
-    case continueTransfer = 0x03
-    case requestChunk = 0x06
-    case chunkReceived = 0x07
-    case complete = 0x08
-    
-    // Upload commands
-    case startSendFile = 0x10  // Start send file from app to tdmouse
-    case requestChunkFromApp = 0x11  // request chunk file from app to FW
+    case startFileTransfer = 0x11
+    case getFileList = 0x12
+    case deviceControl = 0x05
+}
+
+enum AckResponse: UInt8 {
+    case failed = 0
+    case success = 1
+    case invalid = 2
 }
 
 // MARK: - File Transfer State
@@ -43,6 +42,12 @@ enum TransferState: Equatable {
         }
         return nil
     }
+}
+
+enum FileTransferMode {
+    case none
+    case fileList
+    case fileTransfer
 }
 
 // MARK: - BLE File Transfer Manager
@@ -69,8 +74,8 @@ class BLEFileTransferManager: NSObject, ObservableObject {
     // MARK: - Private Properties
     private var centralManager: CBCentralManager!
     private var peripheral: CBPeripheral?
-    private var fileControlCharacteristic: CBCharacteristic?
-    private var fileInfoCharacteristic: CBCharacteristic?
+    private var fileControlChar: CBCharacteristic?
+    private var fileInfoChar: CBCharacteristic?
     private var fileDataCharacteristic: CBCharacteristic?
     private var fileAcknowledgmentCharacteristic: CBCharacteristic?
     private var fileErrorCharacteristic: CBCharacteristic?
@@ -80,6 +85,9 @@ class BLEFileTransferManager: NSObject, ObservableObject {
     private var fileData = Data()
     private var transferState: UInt8 = 0 // 0: IDLE, 1: IN_PROGRESS
     private var chunkSize: Int = 180
+    private var fileListDataBuffer = Data()
+    private var fileList: [[String: Any]] = []
+    private var fileTransferMode: FileTransferMode = .none
     
     // Upload
     private var uploadFileData: Data?
@@ -118,34 +126,6 @@ class BLEFileTransferManager: NSObject, ObservableObject {
         self.state = .idle
     }
     
-    func requestChunk(_ chunkNum: UInt8) {
-        guard let peripheral else {
-            state = .error("BLE is not connected, please try again!")
-            return
-        }
-        
-        guard let fileControlChar = fileControlCharacteristic else {
-            state = .error("File control characteristic is not ready, please try again!")
-            return
-        }
-        
-        let requestChunkCommand = Data([FileCommand.requestChunk.rawValue, chunkNum]) // 0x06
-        peripheral.writeValue(
-            requestChunkCommand,
-            for: fileControlChar,
-            type: .withResponse
-        )
-        
-        print("==> Sent request chunk command")
-        
-        print("==> Step 5: Read file data")
-        guard let fileDataCharacteristic else {
-            state = .error("File data characteristic is not ready, please try again!")
-            return
-        }
-        peripheral.readValue(for: fileDataCharacteristic)
-    }
-    
     func saveFile() -> URL? {
         state = .saving
         
@@ -153,148 +133,84 @@ class BLEFileTransferManager: NSObject, ObservableObject {
         print("==> FInal: \(dataFinal)")
         
         return nil
-        
-        // save file to local
-//        state = .saving
-//        let fileURL = FileManager.default.temporaryDirectory.appendingPathComponent(fileName)
-//            
-//        do {
-//            try fileData.write(to: fileURL)
-//            transferCompletedFiles.append(fileURL)
-//            return fileURL
-//        } catch {
-//            state = .error("Failed to save file: \(error.localizedDescription)")
-//            return nil
-//        }
-    }
-    
-    // Start upload
-    func startUploadFile() {
-        // Create a text file
-        uploadSelectedFile(sampleText.data(using: .utf8))
-    }
-    
-    // Upload file
-    func uploadSelectedFile(_ fileData: Data?) {
-        guard let peripheral = self.peripheral else {
-            state = .error("BLE Not Connected!")
-            print("BLE Not Connected!")
-            return
-        }
-        
-        guard let fileData else {
-            state = .error("Can not convert sample string to data!")
-            print("Can not convert sample string to data")
-            return
-        }
-        
-        do {
-            // Load file data
-            uploadFileData = fileData
-            uploadFileName = "sampleText.txt"
-            let uploadFileSize = uploadFileData?.count ?? 0
-            
-            // Calculate chunks
-            uploadCurrentChunk = 0
-            uploadTotalChunks = Int((uploadFileSize + chunkSize - 1) / chunkSize)
-            
-            print("==> Starting file upload: \(uploadFileName ?? "unknown"), \(uploadFileSize) bytes, \(uploadTotalChunks) chunks")
-            
-            // Send start upload command
-            guard let fileControlChar = fileControlCharacteristic else {
-                state = .error("File control characteristic not found")
-                print("File control characteristic not found")
-                return
-            }
-            
-            // Reset state for upload
-            state = .preparing
-            
-            // Step 1: Send start upload command (0x10 0x00)
-            let startUploadCmd = Data([0x10, 0x00])
-            peripheral.writeValue(
-                startUploadCmd,
-                for: fileControlChar,
-                type: .withResponse
-            )
-            
-            print("==> Sent start upload command")
-            
-            // Step 2: Prepare file metadata
-            prepareFileMetadata()
-            
-        } catch {
-            state = .error("Failed to read file: \(error.localizedDescription)")
-            print("Failed to read file: \(error.localizedDescription)")
-        }
-    }
-    
-    private func prepareFileMetadata() {
-        guard let peripheral = self.peripheral,
-              let fileInfoChar = fileInfoCharacteristic,
-              let fileName = uploadFileName,
-              let fileData = uploadFileData else {
-            state = .error("Upload preparation failed")
-            return
-        }
-        
-        // File info format:
-        // byte 0: file name length
-        // byte 1-n: file name
-        // byte n+1-n+4: file size (4 bytes, little endian)
-        var fileInfoData = Data()
-        
-        let fileNameData = Data(fileName.utf8)
-        fileInfoData.append(fileNameData)
-        
-        // Add file size (4 bytes, little endian)
-        var fileSize = UInt32(fileData.count)
-        let fileSizeData = withUnsafeBytes(of: &fileSize) { Data($0) }
-        fileInfoData.append(fileSizeData)
-        
-        // Send file metadata
-        peripheral.writeValue(
-            fileInfoData,
-            for: fileInfoChar,
-            type: .withResponse
-        )
-        
-        print("==> Sent file metadata: name=\(fileName), size=\(fileData.count)")
-        state = .transferring
     }
 }
 
-// MARK: - Public Functions
+// MARK: - Working
 extension BLEFileTransferManager {
-    
-    func startTransfer() {
+    func startFileTransfer() {
         guard let peripheral else {
             state = .error("BLE Not Connected!")
             return
         }
-   
-//
-//        // Reset transfer state
-//        fileData = Data()
-//        currentChunk = 0
-//        state = .preparing
         
-        // Step 1: Request start transfer file
-        print("==> Step 1: Request start transfer file")
-        guard let fileControlTransferChar = fileControlCharacteristic else {
-            state = .error("File control characteristic not ready, please retry again!")
+        requestFileList()
+    }
+    
+    func requestFileList() {
+        fileTransferMode = .fileList
+        fileList.removeAll()
+        fileListDataBuffer.removeAll()
+        commandGetFileList()
+    }
+    
+    func commandGetFileList() {
+        guard let peripheral, let fileControlChar else {
             return
         }
+        // Get File List: 0x12 - 0x00
+        let commandData = Data([0x12, 0x00])
+        peripheral.writeValue(commandData, for: fileControlChar, type: .withResponse)
+    }
+    
+    func commandRequestNextFileListChunk() {
+        guard let peripheral, let fileControlChar else {
+            return
+        }
+        // Get File List: 0x12 - 0x01
+        let commandData = Data([0x12, 0x01])
+        peripheral.writeValue(commandData, for: fileControlChar, type: .withResponse)
+    }
+    
+    func commandStartFileTransfer() {
+        guard let peripheral, let fileControlChar else {
+            return
+        }
+        // Start File Transfer: 0x11 - 0x00
+        let commandData = Data([0x11, 0x00])
+        peripheral.writeValue(commandData, for: fileControlChar, type: .withResponse)
+    }
+    
+    func commandRequestNextFileChunk() {
+        guard let peripheral, let fileControlChar else {
+            return
+        }
+        // Get File List: 0x11 - 0x01
+        let commandData = Data([0x11, 0x01])
+        peripheral.writeValue(commandData, for: fileControlChar, type: .withResponse)
+    }
+    
+    func commandReadInfo() {
+        guard let peripheral, let fileInfoChar else {
+            return
+        }
+        // Read info at FFE7
+        peripheral.readValue(for: fileInfoChar)
+    }
+    
+    func processFileListChunk(_ data: Data) {
+        fileListDataBuffer.append(data)
+        guard let dataString = fileListDataBuffer.string else {
+            return
+        }
+        print("Current buffer: \(dataString)")
         
-        let startTransferCmd = Data([FileCommand.startTransfer.rawValue, 0]) // 0x01
-        peripheral.writeValue(
-            startTransferCmd,
-            for: fileControlTransferChar,
-            type: .withResponse
-        )
-        
-        print("==> Send request transfer file")
-        state = .transferring
+        // This marks the end of the file list data array
+        if dataString.contains("]}") {
+            print("Found complete JSON with closing brackets")
+        } else {
+            commandRequestNextFileListChunk()
+        }
     }
 }
 
@@ -332,7 +248,8 @@ extension BLEFileTransferManager: CBCentralManagerDelegate {
     func centralManager(_ central: CBCentralManager, didConnect peripheral: CBPeripheral) {
         connectedDevice = peripheral
         connectedDevice?.delegate = self
-        connectedDevice?.discoverServices([BLEConstants.serviceUUID])
+        connectedDevice?.discoverServices([BLEConstants.fileTransferServiceUUID])
+        
         print("Connected to \(peripheral.name ?? "unknown device")")
         print("Max: \(connectedDevice!.maximumWriteValueLength(for: .withoutResponse)) - \(connectedDevice!.maximumWriteValueLength(for: .withResponse))")
     }
@@ -375,12 +292,12 @@ extension BLEFileTransferManager: CBPeripheralDelegate {
         for characteristic in characteristics {
             switch characteristic.uuid {
             case BLEConstants.fileControlCharUUID:
-                fileControlCharacteristic = characteristic
+                fileControlChar = characteristic
                 print("==> fileControlCharUUID detected: \(characteristic)")
                 
             case BLEConstants.fileInfoCharUUID:
                 print("==> fileInfoCharUUID detected: \(characteristic)")
-                fileInfoCharacteristic = characteristic
+                fileInfoChar = characteristic
                 isEnabledButton = true
                 
             case BLEConstants.fileDataCharUUID:
@@ -410,101 +327,39 @@ extension BLEFileTransferManager: CBPeripheralDelegate {
         print("==> [Delegate] didUpdateValueFor : \(characteristic)")
         
         guard let data = characteristic.value else { return }
-
+        
+        if let dataStr = data.string {
+            print("==> didUpdateValueFor raw data: \(dataStr)")
+        }
+        
         switch characteristic.uuid {
         case BLEConstants.fileControlCharUUID: // FFE6
-            if state == .transferring && totalChunks == -1 {
-                // Download flow
-                print("==> Step 2: Read file info")
-                guard let fileInfoCharacteristic else {
-                    state = .error("File Info Characteristic is not ready, please retry again")
-                    return
-                }
-                peripheral.readValue(for: fileInfoCharacteristic)
-            } else if data.count >= 2 && data[0] == FileCommand.requestChunkFromApp.rawValue {
-                // Upload flow
-                print("==> Firmware requesting chunk \(data[1])")
-                processChunkRequest(data)
-            }
-                
+            break
+            
         case BLEConstants.fileInfoCharUUID: // FFE7
-            if state == .transferring && totalChunks == -1 {
-                // Download flow
-                print("===> Step 3: Received file info, do the processing file info")
-                print("====> process file info data: \(String(describing: data.string))")
-                processFileInfo(data)
-            }
+            switch fileTransferMode {
+            case .fileList:
+                processFileListChunk(data)
                 
+            default:
+                return
+            }
+            
         case BLEConstants.fileDataCharUUID: // FFE8
-            if state == .transferring && totalChunks != -1 {
-                // Download flow
-                print("====> process chunk data: \(String(describing: data.string))")
-                processChunkData(data)
-            }
-                
+            break
+            
         case BLEConstants.fileErrCharUUID:
             print("====> error received: \(String(describing: data.string))")
-                
+            
         case BLEConstants.fileAckCharUUID:
             print("====> process ack data: \(String(describing: data.string))")
             
-            if data.count >= 2 {
-                if data[0] == FileCommand.chunkReceived.rawValue || data[0] == 0x01 {
-                    // Download flow
-                    handleAckResponse(data)
-                } else if data[0] == 0x10 || data[0] == 0x08 {
-                    // Upload flow
-                    handleUploadAckResponse(data)
-                }
-            }
-                
         default:
             break
         }
     }
-    
-//    func peripheral(_ peripheral: CBPeripheral, didUpdateValueFor characteristic: CBCharacteristic, error: Error?) {
-//        if let error = error {
-//            state = .error("Error reading characteristic value: \(error.localizedDescription)")
-//            return
-//        }
-//        
-//        print("==> [Delegate] didUpdateValueFor : \(characteristic)")
-//        
-//        guard let data = characteristic.value else { return }
-//
-//        switch characteristic.uuid {
-//        case BLEConstants.fileControlCharUUID: // FFE6
-//            print("==> Step 2: Read file info")
-//            guard let fileInfoCharacteristic else {
-//                state = .error("File Info Characteristic is not ready, please retry again")
-//                return
-//            }
-//            if totalChunks == -1 && state == .transferring {
-//                peripheral.readValue(for: fileInfoCharacteristic)
-//            }
-//            
-//        case BLEConstants.fileInfoCharUUID: // FFE7
-//            print("===> Step 3: Received file info, do the processing file info")
-//            print("====> process file info data: \(String(describing: data.string))")
-//            processFileInfo(data)
-//            
-//        case BLEConstants.fileDataCharUUID: // FFE8
-//            print("====> process chunk data: \(String(describing: data.string))")
-//            processChunkData(data)
-//            
-//        case BLEConstants.fileErrCharUUID:
-//            print("====> error received: \(String(describing: data.string))")
-//            
-//        case BLEConstants.fileAckCharUUID:
-//            print("====> process ack data: \(String(describing: data.string))")
-//            handleAckResponse(data)
-//            
-//        default:
-//            break
-//        }
-//    }
-    
+            
+            
     func peripheral(_ peripheral: CBPeripheral, didWriteValueFor characteristic: CBCharacteristic, error: Error?) {
         print("==> didWriteValueFor called for \(characteristic.uuid)")
         
@@ -512,147 +367,22 @@ extension BLEFileTransferManager: CBPeripheralDelegate {
             state = .error("Error writing value: \(error.localizedDescription)")
         }
         
+        guard let data = characteristic.value else { return }
+        
+        if let dataStr = data.string {
+            print("==> [didWriteValueFor] raw data: \(dataStr)")
+        }
+        
         switch characteristic.uuid {
-        case BLEConstants.fileControlCharUUID:
-            if totalChunks == -1 && state == .transferring {
-                peripheral.readValue(for: characteristic)
-            }
+        case BLEConstants.fileControlCharUUID: // FFE6
+            commandReadInfo()
             
         default:
-            break
+            return
         }
     }
     
     func peripheral(_ peripheral: CBPeripheral, didUpdateNotificationStateFor characteristic: CBCharacteristic, error: (any Error)?) {
-    }
-    // Upload
-    func processChunkRequest(_ data: Data) {
-        
-    }
-    // Upload
-    func handleUploadAckResponse(_ data: Data) {
-    }
-    
-    private func processFileInfo(_ data: Data) {
-        guard data.count > 1 else {
-            state = .error("File info is invalid, please retry again")
-            return
-        }
-        
-        if totalChunks == -1 {
-//            let nameLength = Int(data[0])
-//            guard data.count >= nameLength + 5 else {
-//                state = .error("File info has invalid format, please retry again")
-//                return
-//            }
-            
-            let nameLength = Int(data[0]) | (Int(data[1]) << 8)
-            
-            // Extract file name
-            if let nameData = data.subdata(in: 1..<(nameLength+1)).string {
-                fileName = nameData.trimmingCharacters(in: CharacterSet(charactersIn: "\0"))
-            }
-            
-            // Extract file size (4 bytes, little-endian)
-            let fileSizeData = data.subdata(in: (nameLength+1)..<(nameLength+5))
-            fileSize = Int(UInt32(littleEndian: fileSizeData.withUnsafeBytes { $0.load(as: UInt32.self) }))
-            
-            // Calculate total chunks
-            totalChunks = Int((fileSize + chunkSize - 1) / chunkSize)  // Chunk size is 20 bytes
-            
-            currentChunk = 0
-            fileData = Data()
-            
-            print("==> File info received: \(fileName), \(fileSize) bytes, \(totalChunks) chunks")
-            
-            // Start requesting chunks
-            requestNextChunk()
-        } else {
-            // Continue request chunks
-            currentChunk += 1
-            requestNextChunk()
-        }
-    }
-    
-    private func requestNextChunk() {
-        guard currentChunk < totalChunks else {
-            completeTransfer()
-            return
-        }
-        
-        print("==> Step \(4 + currentChunk): Request next chunk with current chunk is: \(currentChunk)/\(totalChunks)")
-        requestChunk(UInt8(currentChunk))
-    }
-    
-    private func completeTransfer() {
-        state = .complete
-        currentChunk = 0
-        totalChunks = -1
-        print("Transfer completed")
-        
-        // Save file
-        do {
-            let fileURL = saveFile()
-            print("File saved to \(String(describing: fileURL?.path))")
-            completionHandler?(fileURL, nil)
-        } catch {
-            print("Error saving file: \(error.localizedDescription)")
-            completionHandler?(nil, error)
-        }
-        // Read ack data to know the status
-        guard let peripheral else {
-            return
-        }
-        
-        guard let fileAckChar = fileAcknowledgmentCharacteristic else {
-            return
-        }
-        peripheral.readValue(for: fileAckChar)
-    }
-    
-    func handleAckResponse(_ data: Data) {
-        guard data.count >= 2 else {
-            state = .error("Invalid response format")
-            return
-        }
-        
-        let responseCode = data[0]
-        let statusCode = data[1]
-        
-        if responseCode == 0x01 {
-            if statusCode == 0x00 {
-                // Success case
-                print("===> Transfer started successfully")
-                
-            } else {
-                // Error case
-                state = .error("===> Failed to start transfer, error code: \(statusCode)")
-            }
-        }
-    }
-    
-    private func processChunkData(_ data: Data) {
-        // Prevent un-wanted returned chunk
-        guard totalChunks != -1 else { return }
-        // Append chunk data to file data
-        fileData.append(data)
-        print("==> Received chunk \(currentChunk): \(data.count) bytes")
-        print("current chunk: \(currentChunk) - totals: \(totalChunks)")
-        
-        // Send chunk acknowledgement
-        if let ackCharacteristic = fileAcknowledgmentCharacteristic, let peripheral = peripheral {
-            let ackData = Data([FileCommand.chunkReceived.rawValue, UInt8(currentChunk)])
-            peripheral.writeValue(ackData, for: ackCharacteristic, type: .withResponse)
-            peripheral.readValue(for: fileDataCharacteristic!)
-        }
-        
-        // Check if transfer is complete
-        if currentChunk + 1 >= totalChunks {
-            completeTransfer()
-        } else {
-            currentChunk += 1
-            requestNextChunk()
-        }
     }
 }
 
@@ -662,7 +392,7 @@ struct ContentView: View {
     @State private var showingBLEDevicesSheet = false
     @State private var showingFilePickerSheet = false
     @State private var selectedFileURL: URL?
-
+    
     
     var body: some View {
         NavigationView {
@@ -728,20 +458,19 @@ struct ContentView: View {
                 // Action Buttons
                 if bleManager.connectedDevice != nil && bleManager.state != .transferring {
                     Button("Start File Transfer") {
-                        bleManager.startTransfer()
+                        bleManager.startFileTransfer()
                     }
                     .buttonStyle(.borderedProminent)
-//                    .disabled(bleManager.state == .transferring)
                     .disabled(bleManager.isEnabledButton)
                     .padding()
                     
-                    // Upload file
-                    Button("Upload File") {
-                        bleManager.startUploadFile()
-                    }
-                    .buttonStyle(.borderedProminent)
-                    .disabled(bleManager.isEnabledButton)
-                    .padding()
+                    //                    // Upload file
+                    //                    Button("Upload File") {
+                    //                        bleManager.startUploadFile()
+                    //                    }
+                    //                    .buttonStyle(.borderedProminent)
+                    //                    .disabled(bleManager.isEnabledButton)
+                    //                    .padding()
                 }
                 
                 // Completed Files
@@ -832,3 +561,4 @@ struct BLEDevicesView: View {
         }
     }
 }
+
