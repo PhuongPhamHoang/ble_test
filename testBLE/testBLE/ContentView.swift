@@ -159,7 +159,8 @@ extension BLEFileTransferManager {
         
 //        requestFileList()
 //        commandWriteFileName(fileName: "tdmouse")
-        commandReadDeviceStatus()
+//        commandReadDeviceStatus()
+        commandPutDeviceSleep()
     }
     
     func requestFileList() {
@@ -230,6 +231,28 @@ extension BLEFileTransferManager {
         
         // Read TDMouse Status
         let commandData = Data([0x01])
+        peripheral.writeValue(
+            commandData,
+            for: deviceControlChar,
+            type: .withResponse
+        )
+        peripheral.readValue(for: deviceControlChar)
+    }
+    
+    func commandPutDeviceSleep() {
+        /*
+         - For success command: `1`
+         - For unsuccess command: `0`
+         - Invalid command: `2`
+         */
+        guard let peripheral, let deviceControlChar else {
+            return
+        }
+        
+        deviceControlMode = .putToSleep
+        
+        // Put TDMouse Sleep
+        let commandData = Data([0x02])
         peripheral.writeValue(
             commandData,
             for: deviceControlChar,
@@ -499,6 +522,8 @@ extension BLEFileTransferManager: CBPeripheralDelegate {
             switch deviceControlMode {
             case .readStatus:
                 print("Device status: \(status)")
+            case .putToSleep:
+                print("Put device sleep: \(status)")
                 
             default:
                 return
