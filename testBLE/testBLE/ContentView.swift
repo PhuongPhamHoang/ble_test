@@ -76,7 +76,7 @@ class BLEFileTransferManager: NSObject, ObservableObject {
     private var peripheral: CBPeripheral?
     private var fileControlChar: CBCharacteristic?
     private var fileInfoChar: CBCharacteristic?
-    private var fileDataCharacteristic: CBCharacteristic?
+    private var fileDataChar: CBCharacteristic?
     private var fileAcknowledgmentCharacteristic: CBCharacteristic?
     private var fileErrorCharacteristic: CBCharacteristic?
     
@@ -144,7 +144,8 @@ extension BLEFileTransferManager {
             return
         }
         
-        requestFileList()
+//        requestFileList()
+        commandWriteFileName(fileName: "tdmouse")
     }
     
     func requestFileList() {
@@ -173,12 +174,15 @@ extension BLEFileTransferManager {
     }
     
     func commandStartFileTransfer() {
-        guard let peripheral, let fileControlChar else {
+        guard let peripheral, let fileControlChar, let fileDataChar else {
             return
         }
         // Start File Transfer: 0x11 - 0x00
         let commandData = Data([0x11, 0x00])
         peripheral.writeValue(commandData, for: fileControlChar, type: .withResponse)
+        
+        // Then read the data on E8
+        peripheral.readValue(for: fileDataChar)
     }
     
     func commandRequestNextFileChunk() {
@@ -212,14 +216,14 @@ extension BLEFileTransferManager {
             print("completed Data String: \(completedDataString)")
             
             // parse json
-            guard let commandData = parseJSON(jsonString: completedDataString) else { return }
+            guard let commandData = parseCommandDataJSON(jsonString: completedDataString) else { return }
             fileList.append(commandData)
         } else {
             commandRequestNextFileListChunk()
         }
     }
     
-    func parseJSON(jsonString: String) -> CommandData? {
+    func parseCommandDataJSON(jsonString: String) -> CommandData? {
         guard let jsonData = jsonString.data(using: .utf8) else {
             print("Failed to convert string to data")
             return nil
@@ -228,6 +232,65 @@ extension BLEFileTransferManager {
         do {
             let decoder = JSONDecoder()
             let commandData = try decoder.decode(CommandData.self, from: jsonData)
+            return commandData
+        } catch {
+            print("Error decoding JSON: \(error)")
+            return nil
+        }
+    }
+    
+    func commandWriteFileName(fileName: String) {
+        guard let peripheral, let fileInfoChar, let fileDataChar else { return }
+        
+        fileTransferMode = .fileTransfer
+        fileData.removeAll()
+        
+        // Note: file_path + file_name, if file is at home, only need file_name
+        guard let jsonData = fileName.data(using: .utf8) else { return }
+        
+        peripheral.writeValue(
+            jsonData,
+            for: fileInfoChar,
+            type: .withResponse
+        )
+        
+        // start file tranfer
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.1, execute: {
+            self.commandStartFileTransfer()
+        })
+    }
+    
+    func processFileDataChunk(_ data: Data) {
+        fileData.append(data)
+        guard let dataString = fileData.string else {
+            return
+        }
+        print("Current buffer: \(dataString)")
+        
+        // This marks the end of the file list data array
+        if dataString.contains("]}") {
+            print("Found complete JSON with closing brackets")
+            let completedDataString = dataString.removingNullBytes()
+            print("completed Data String: \(completedDataString)")
+            
+            // parse json
+            guard let commandData = parseFileDownloadDataJSON(jsonString: completedDataString) else { return }
+            // We got file data here (commandData) --> complete file download flow
+            // TODO: Phuong please help the flow write to local
+        } else {
+            commandRequestNextFileChunk()
+        }
+    }
+    
+    func parseFileDownloadDataJSON(jsonString: String) -> FileDownloadData? {
+        guard let jsonData = jsonString.data(using: .utf8) else {
+            print("Failed to convert string to data")
+            return nil
+        }
+        
+        do {
+            let decoder = JSONDecoder()
+            let commandData = try decoder.decode(FileDownloadData.self, from: jsonData)
             return commandData
         } catch {
             print("Error decoding JSON: \(error)")
@@ -324,7 +387,7 @@ extension BLEFileTransferManager: CBPeripheralDelegate {
                 
             case BLEConstants.fileDataCharUUID:
                 print("==> fileDataCharUUID detected: \(characteristic)")
-                fileDataCharacteristic = characteristic
+                fileDataChar = characteristic
                 
             case BLEConstants.fileAckCharUUID:
                 print("==> fileAckCharUUID detected: \(characteristic)")
@@ -348,10 +411,10 @@ extension BLEFileTransferManager: CBPeripheralDelegate {
         
         print("==> [Delegate] didUpdateValueFor : \(characteristic)")
         
-        guard let data = characteristic.value else { return }
-        
-        if let dataStr = data.string {
-            print("==> didUpdateValueFor raw data: \(dataStr)")
+        if let data = characteristic.value {
+            if let dataStr = data.string {
+                print("==> didUpdateValueFor raw data: \(dataStr)")
+            }
         }
         
         switch characteristic.uuid {
@@ -359,6 +422,8 @@ extension BLEFileTransferManager: CBPeripheralDelegate {
             break
             
         case BLEConstants.fileInfoCharUUID: // FFE7
+            guard let data = characteristic.value else { return }
+            
             switch fileTransferMode {
             case .fileList:
                 processFileListChunk(data)
@@ -368,13 +433,15 @@ extension BLEFileTransferManager: CBPeripheralDelegate {
             }
             
         case BLEConstants.fileDataCharUUID: // FFE8
-            break
+            // App writes file name want to upload TDMouse
+            guard let data = characteristic.value else { return  }
+            processFileDataChunk(data)
             
         case BLEConstants.fileErrCharUUID:
-            print("====> error received: \(String(describing: data.string))")
+            break
             
         case BLEConstants.fileAckCharUUID:
-            print("====> process ack data: \(String(describing: data.string))")
+            break
             
         default:
             break
@@ -597,4 +664,18 @@ struct CommandData: Codable {
     let category: Int
     let command: Int
     let data: [FileData]
+}
+
+struct FileUploadData: Codable {
+    let path: String
+}
+
+struct FileDownloadData: Codable {
+    let category: Int
+    let command: Int
+    let data: [FileDownloadItemData]
+}
+
+struct FileDownloadItemData: Codable {
+    let content: String
 }
