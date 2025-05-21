@@ -650,7 +650,7 @@ extension BLEFileTransferManager: CBPeripheralDelegate {
             
         case BLEConstants.batteryLevelCharUUID: // 2A19
             guard let data = characteristic.value, let dataInt = data.string?.unicodeValue else { return }
-            print("Battery level: \(dataInt) %")
+            print("Battery level: \(dataInt)%")
             
         default:
             break
