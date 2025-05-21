@@ -11,6 +11,7 @@ struct BLEConstants {
     static let fileAckCharUUID = CBUUID(string: "FFE9")
     static let fileErrCharUUID = CBUUID(string: "FFEA")
     
+    static let deviceControlCharUUID = CBUUID(string: "FFEB")
 }
 
 // MARK: - File Command Codes
@@ -50,6 +51,16 @@ enum FileTransferMode {
     case fileTransfer
 }
 
+enum DeviceControlMode {
+    case none
+    case readStatus
+    case putToSleep
+    case wakeUp
+    case shutdown
+    case turnOnWiFi
+    case turnOffWifi
+}
+
 // MARK: - BLE File Transfer Manager
 class BLEFileTransferManager: NSObject, ObservableObject {
     // MARK: - Published Properties
@@ -79,6 +90,7 @@ class BLEFileTransferManager: NSObject, ObservableObject {
     private var fileDataChar: CBCharacteristic?
     private var fileAcknowledgmentCharacteristic: CBCharacteristic?
     private var fileErrorCharacteristic: CBCharacteristic?
+    private var deviceControlChar: CBCharacteristic?
     
     private var completionHandler: ((URL?, Error?) -> Void)?
     
@@ -88,6 +100,7 @@ class BLEFileTransferManager: NSObject, ObservableObject {
     private var fileListDataBuffer = Data()
     private var fileList: [CommandData] = []
     private var fileTransferMode: FileTransferMode = .none
+    private var deviceControlMode: DeviceControlMode = .none
     
     // Upload
     private var uploadFileData: Data?
@@ -145,7 +158,8 @@ extension BLEFileTransferManager {
         }
         
 //        requestFileList()
-        commandWriteFileName(fileName: "tdmouse")
+//        commandWriteFileName(fileName: "tdmouse")
+        commandReadDeviceStatus()
     }
     
     func requestFileList() {
@@ -202,6 +216,28 @@ extension BLEFileTransferManager {
         peripheral.readValue(for: fileInfoChar)
     }
     
+    func commandReadDeviceStatus() {
+        /* Purpose: check TDMouse live or not.
+          - For success command: `1`
+          - For unsuccess command: `0`
+          - Invalid command: `2`
+         */
+        guard let peripheral, let deviceControlChar else {
+            return
+        }
+        
+        deviceControlMode = .readStatus
+        
+        // Read TDMouse Status
+        let commandData = Data([0x01])
+        peripheral.writeValue(
+            commandData,
+            for: deviceControlChar,
+            type: .withResponse
+        )
+        peripheral.readValue(for: deviceControlChar)
+    }
+    
     func processFileListChunk(_ data: Data) {
         fileListDataBuffer.append(data)
         guard let dataString = fileListDataBuffer.string else {
@@ -240,7 +276,7 @@ extension BLEFileTransferManager {
     }
     
     func commandWriteFileName(fileName: String) {
-        guard let peripheral, let fileInfoChar, let fileDataChar else { return }
+        guard let peripheral, let fileInfoChar else { return }
         
         fileTransferMode = .fileTransfer
         fileData.removeAll()
@@ -397,6 +433,10 @@ extension BLEFileTransferManager: CBPeripheralDelegate {
                 print("==> fileErrCharUUID detected: \(characteristic)")
                 fileErrorCharacteristic = characteristic
                 
+            case BLEConstants.deviceControlCharUUID:
+                print("==> deviceControlCharUUID detected: \(characteristic)")
+                deviceControlChar = characteristic
+                
             default:
                 break
             }
@@ -442,6 +482,27 @@ extension BLEFileTransferManager: CBPeripheralDelegate {
             
         case BLEConstants.fileAckCharUUID:
             break
+            
+        case BLEConstants.deviceControlCharUUID: // FFEB
+            guard let data = characteristic.value, let dataStr = data.string else { return }
+            
+            var status = ""
+            switch dataStr {
+            case "\u{01}":
+                status = "Success"
+            case "\u{02}":
+                status = "Invalid"
+            default:
+                status = "Failed"
+            }
+            
+            switch deviceControlMode {
+            case .readStatus:
+                print("Device status: \(status)")
+                
+            default:
+                return
+            }
             
         default:
             break
