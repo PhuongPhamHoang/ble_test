@@ -5,6 +5,8 @@ import CoreBluetooth
 // MARK: - BLE Constants
 struct BLEConstants {
     static let fileTransferServiceUUID = CBUUID(string: "FFE0")
+    static let batteryServiceUUID = CBUUID(string: "180F")
+    
     static let fileControlCharUUID = CBUUID(string: "FFE6")
     static let fileInfoCharUUID = CBUUID(string: "FFE7")
     static let fileDataCharUUID = CBUUID(string: "FFE8")
@@ -12,6 +14,7 @@ struct BLEConstants {
     static let fileErrCharUUID = CBUUID(string: "FFEA")
     
     static let deviceControlCharUUID = CBUUID(string: "FFEB")
+    static let batteryLevelCharUUID = CBUUID(string: "2A19")
 }
 
 // MARK: - File Command Codes
@@ -91,6 +94,7 @@ class BLEFileTransferManager: NSObject, ObservableObject {
     private var fileAcknowledgmentCharacteristic: CBCharacteristic?
     private var fileErrorCharacteristic: CBCharacteristic?
     private var deviceControlChar: CBCharacteristic?
+    private var batteryLevelChar: CBCharacteristic?
     
     private var completionHandler: ((URL?, Error?) -> Void)?
     
@@ -157,10 +161,15 @@ extension BLEFileTransferManager {
             return
         }
         
-//        requestFileList()
-//        commandWriteFileName(fileName: "tdmouse")
-//        commandReadDeviceStatus()
-        commandPutDeviceSleep()
+        //        requestFileList()
+        //        commandWriteFileName(fileName: "tdmouse")
+        //        commandReadDeviceStatus()
+        //        commandPutDeviceSleep()
+        //        commandWakeUpDevice()
+        //        commandShutdownDevice()
+        //        commandTurnOnWiFiDevice()
+        commandReadBatteryLevel()
+        
     }
     
     func requestFileList() {
@@ -259,6 +268,102 @@ extension BLEFileTransferManager {
             type: .withResponse
         )
         peripheral.readValue(for: deviceControlChar)
+    }
+    
+    func commandWakeUpDevice() {
+        /*
+         - For success command: `1`
+         - For unsuccess command: `0`
+         - Invalid command: `2`
+         */
+        guard let peripheral, let deviceControlChar else {
+            return
+        }
+        
+        deviceControlMode = .wakeUp
+        
+        // Put TDMouse Sleep
+        let commandData = Data([0x03])
+        peripheral.writeValue(
+            commandData,
+            for: deviceControlChar,
+            type: .withResponse
+        )
+        peripheral.readValue(for: deviceControlChar)
+    }
+    
+    func commandShutdownDevice() {
+        /*
+         - For success command: `1`
+         - For unsuccess command: `0`
+         - Invalid command: `2`
+         */
+        guard let peripheral, let deviceControlChar else {
+            return
+        }
+        
+        deviceControlMode = .shutdown
+        
+        // Put TDMouse Sleep
+        let commandData = Data([0x04])
+        peripheral.writeValue(
+            commandData,
+            for: deviceControlChar,
+            type: .withResponse
+        )
+        peripheral.readValue(for: deviceControlChar)
+    }
+    
+    func commandTurnOnWiFiDevice() {
+        /*
+         - For success command: `1`
+         - For unsuccess command: `0`
+         - Invalid command: `2`
+         */
+        guard let peripheral, let deviceControlChar else {
+            return
+        }
+        
+        deviceControlMode = .turnOnWiFi
+        
+        // Put TDMouse Sleep
+        let commandData = Data([0x05])
+        peripheral.writeValue(
+            commandData,
+            for: deviceControlChar,
+            type: .withResponse
+        )
+        peripheral.readValue(for: deviceControlChar)
+    }
+    
+    func commandTurnOffWiFiDevice() {
+        /*
+         - For success command: `1`
+         - For unsuccess command: `0`
+         - Invalid command: `2`
+         */
+        guard let peripheral, let deviceControlChar else {
+            return
+        }
+        
+        deviceControlMode = .turnOffWifi
+        
+        // Put TDMouse Sleep
+        let commandData = Data([0x06])
+        peripheral.writeValue(
+            commandData,
+            for: deviceControlChar,
+            type: .withResponse
+        )
+        peripheral.readValue(for: deviceControlChar)
+    }
+    
+    func commandReadBatteryLevel() {
+        guard let peripheral, let batteryLevelChar else {
+            return
+        }
+        
+        peripheral.readValue(for: batteryLevelChar)
     }
     
     func processFileListChunk(_ data: Data) {
@@ -392,7 +497,10 @@ extension BLEFileTransferManager: CBCentralManagerDelegate {
     func centralManager(_ central: CBCentralManager, didConnect peripheral: CBPeripheral) {
         connectedDevice = peripheral
         connectedDevice?.delegate = self
-        connectedDevice?.discoverServices([BLEConstants.fileTransferServiceUUID])
+        connectedDevice?.discoverServices([
+            BLEConstants.fileTransferServiceUUID,
+            BLEConstants.batteryServiceUUID
+        ])
         
         print("Connected to \(peripheral.name ?? "unknown device")")
         print("Max: \(connectedDevice!.maximumWriteValueLength(for: .withoutResponse)) - \(connectedDevice!.maximumWriteValueLength(for: .withResponse))")
@@ -460,6 +568,10 @@ extension BLEFileTransferManager: CBPeripheralDelegate {
                 print("==> deviceControlCharUUID detected: \(characteristic)")
                 deviceControlChar = characteristic
                 
+            case BLEConstants.batteryLevelCharUUID:
+                print("==> batteryLevelCharUUID detected: \(characteristic)")
+                batteryLevelChar = characteristic
+                
             default:
                 break
             }
@@ -524,10 +636,21 @@ extension BLEFileTransferManager: CBPeripheralDelegate {
                 print("Device status: \(status)")
             case .putToSleep:
                 print("Put device sleep: \(status)")
-                
+            case .wakeUp:
+                print("Wake up device: \(status)")
+            case .shutdown:
+                print("Shutdown device: \(status)")
+            case .turnOnWiFi:
+                print("Turn on Wifi device: \(status)")
+            case .turnOffWifi:
+                print("Turn off Wifi device: \(status)")
             default:
                 return
             }
+            
+        case BLEConstants.batteryLevelCharUUID: // 2A19
+            guard let data = characteristic.value, let dataInt = data.string?.unicodeValue else { return }
+            print("Battery level: \(Int(dataInt))%")
             
         default:
             break
@@ -738,6 +861,76 @@ struct BLEDevicesView: View {
 extension String {
     func removingNullBytes() -> String {
         return self.replacingOccurrences(of: "\0", with: "")
+    }
+    
+    /// Converts a hex string like "01" or "14" to its corresponding control character
+    static func controlCharacterFromHex(_ hexString: String) -> String? {
+        guard let value = Int(hexString, radix: 16) else { return nil }
+        guard let unicodeScalar = UnicodeScalar(value) else { return nil }
+        return String(unicodeScalar)
+    }
+    
+    /// Returns the decimal value of the first character in the string
+    var unicodeValue: UInt32? {
+        return first?.unicodeValue
+    }
+    
+    /// Returns the hex representation of the first character
+    var hexValue: String? {
+        guard let value = unicodeValue else { return nil }
+        return String(format: "%02X", value)
+    }
+    
+    /// Checks if this string contains any control characters (0x00-0x1F)
+    var containsControlCharacters: Bool {
+        return unicodeScalars.contains { $0.value < 32 }
+    }
+    
+    /// Removes all control characters from the string
+    var removingControlCharacters: String {
+        return String(unicodeScalars.filter { $0.value >= 32 || $0 == "\t" || $0 == "\n" || $0 == "\r" })
+    }
+    
+    /// Splits string by a specific control character
+    func splitByControlCharacter(_ hexValue: String) -> [String] {
+        guard let separator = String.controlCharacterFromHex(hexValue) else { return [self] }
+        return self.components(separatedBy: separator)
+    }
+    
+    /// Escapes control characters for display purposes
+    var escapingControlCharacters: String {
+        return unicodeScalars.map {
+            if $0.value < 32 {
+                return "\\u{\(String(format: "%X", $0.value))}"
+            } else {
+                return String($0)
+            }
+        }.joined()
+    }
+    
+    /// Join array with a control character as separator
+    static func join(_ array: [String], withControlCharHex hex: String) -> String? {
+        guard let separator = controlCharacterFromHex(hex) else { return nil }
+        return array.joined(separator: separator)
+    }
+}
+
+extension Character {
+    /// Returns the Unicode scalar value of the character
+    var unicodeValue: UInt32? {
+        return unicodeScalars.first?.value
+    }
+    
+    /// Checks if this character is a control character (0x00-0x1F)
+    var isControlCharacter: Bool {
+        guard let value = unicodeValue else { return false }
+        return value < 32
+    }
+    
+    /// Returns the hex representation of this character
+    var hexString: String? {
+        guard let value = unicodeValue else { return nil }
+        return String(format: "%02X", value)
     }
 }
 
