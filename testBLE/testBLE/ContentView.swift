@@ -86,7 +86,7 @@ class BLEFileTransferManager: NSObject, ObservableObject {
     private var transferState: UInt8 = 0 // 0: IDLE, 1: IN_PROGRESS
     private var chunkSize: Int = 180
     private var fileListDataBuffer = Data()
-    private var fileList: [[String: Any]] = []
+    private var fileList: [CommandData] = []
     private var fileTransferMode: FileTransferMode = .none
     
     // Upload
@@ -208,8 +208,30 @@ extension BLEFileTransferManager {
         // This marks the end of the file list data array
         if dataString.contains("]}") {
             print("Found complete JSON with closing brackets")
+            let completedDataString = dataString.removingNullBytes()
+            print("completed Data String: \(completedDataString)")
+            
+            // parse json
+            guard let commandData = parseJSON(jsonString: completedDataString) else { return }
+            fileList.append(commandData)
         } else {
             commandRequestNextFileListChunk()
+        }
+    }
+    
+    func parseJSON(jsonString: String) -> CommandData? {
+        guard let jsonData = jsonString.data(using: .utf8) else {
+            print("Failed to convert string to data")
+            return nil
+        }
+        
+        do {
+            let decoder = JSONDecoder()
+            let commandData = try decoder.decode(CommandData.self, from: jsonData)
+            return commandData
+        } catch {
+            print("Error decoding JSON: \(error)")
+            return nil
         }
     }
 }
@@ -367,9 +389,7 @@ extension BLEFileTransferManager: CBPeripheralDelegate {
             state = .error("Error writing value: \(error.localizedDescription)")
         }
         
-        guard let data = characteristic.value else { return }
-        
-        if let dataStr = data.string {
+        if let data = characteristic.value, let dataStr = data.string {
             print("==> [didWriteValueFor] raw data: \(dataStr)")
         }
         
@@ -562,3 +582,19 @@ struct BLEDevicesView: View {
     }
 }
 
+extension String {
+    func removingNullBytes() -> String {
+        return self.replacingOccurrences(of: "\0", with: "")
+    }
+}
+
+struct FileData: Codable {
+    let name: String
+    let size: Int
+}
+
+struct CommandData: Codable {
+    let category: Int
+    let command: Int
+    let data: [FileData]
+}
