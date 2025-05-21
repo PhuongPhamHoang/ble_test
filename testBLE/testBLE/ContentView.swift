@@ -619,13 +619,13 @@ extension BLEFileTransferManager: CBPeripheralDelegate {
             break
             
         case BLEConstants.deviceControlCharUUID: // FFEB
-            guard let data = characteristic.value, let dataStr = data.string else { return }
+            guard let data = characteristic.value, let dataInt = data.string?.unicodeValue else { return }
             
             var status = ""
-            switch dataStr {
-            case "\u{01}":
+            switch dataInt {
+            case 1:
                 status = "Success"
-            case "\u{02}":
+            case 2:
                 status = "Invalid"
             default:
                 status = "Failed"
@@ -650,7 +650,7 @@ extension BLEFileTransferManager: CBPeripheralDelegate {
             
         case BLEConstants.batteryLevelCharUUID: // 2A19
             guard let data = characteristic.value, let dataInt = data.string?.unicodeValue else { return }
-            print("Battery level: \(Int(dataInt))%")
+            print("Battery level: \(dataInt) %")
             
         default:
             break
