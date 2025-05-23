@@ -161,14 +161,14 @@ extension BLEFileTransferManager {
             return
         }
         
-        //        requestFileList()
-        //        commandWriteFileName(fileName: "tdmouse")
+//        requestFileList()
+        commandWriteFileName(fileName: "test.txt")
         //        commandReadDeviceStatus()
         //        commandPutDeviceSleep()
         //        commandWakeUpDevice()
         //        commandShutdownDevice()
         //        commandTurnOnWiFiDevice()
-        commandReadBatteryLevel()
+//        commandReadBatteryLevel()
         
     }
     
@@ -210,12 +210,13 @@ extension BLEFileTransferManager {
     }
     
     func commandRequestNextFileChunk() {
-        guard let peripheral, let fileControlChar else {
+        guard let peripheral, let fileControlChar, let fileDataChar else {
             return
         }
         // Get File List: 0x11 - 0x01
         let commandData = Data([0x11, 0x01])
         peripheral.writeValue(commandData, for: fileControlChar, type: .withResponse)
+        peripheral.readValue(for: fileDataChar)
     }
     
     func commandReadInfo() {
@@ -432,13 +433,14 @@ extension BLEFileTransferManager {
         print("Current buffer: \(dataString)")
         
         // This marks the end of the file list data array
-        if dataString.contains("]}") {
+        if dataString.contains("}}") {
             print("Found complete JSON with closing brackets")
             let completedDataString = dataString.removingNullBytes()
             print("completed Data String: \(completedDataString)")
             
             // parse json
             guard let commandData = parseFileDownloadDataJSON(jsonString: completedDataString) else { return }
+            print("parsed json: \(commandData)")
             // We got file data here (commandData) --> complete file download flow
             // TODO: Phuong please help the flow write to local
         } else {
@@ -602,6 +604,8 @@ extension BLEFileTransferManager: CBPeripheralDelegate {
             switch fileTransferMode {
             case .fileList:
                 processFileListChunk(data)
+//            case .fileTransfer:
+//                command
                 
             default:
                 return
@@ -952,7 +956,7 @@ struct FileUploadData: Codable {
 struct FileDownloadData: Codable {
     let category: Int
     let command: Int
-    let data: [FileDownloadItemData]
+    let data: FileDownloadItemData
 }
 
 struct FileDownloadItemData: Codable {
