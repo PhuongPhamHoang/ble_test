@@ -99,6 +99,7 @@ class BLEFileTransferManager: NSObject, ObservableObject {
     private var completionHandler: ((URL?, Error?) -> Void)?
     
     private var fileData = Data()
+    private var completedFileContextStr = ""
     private var transferState: UInt8 = 0 // 0: IDLE, 1: IN_PROGRESS
     private var chunkSize: Int = 180
     private var fileListDataBuffer = Data()
@@ -162,7 +163,11 @@ extension BLEFileTransferManager {
         }
         
 //        requestFileList()
-        commandWriteFileName(fileName: "test.txt")
+//        commandWriteFileName(fileName: "test.txt")
+        //Large file -> 43780
+        
+        commandWriteFileName(fileName: "test_large.txt", fileSize: 8580)
+    
         //        commandReadDeviceStatus()
         //        commandPutDeviceSleep()
         //        commandWakeUpDevice()
@@ -215,6 +220,8 @@ extension BLEFileTransferManager {
         }
         // Get File List: 0x11 - 0x01
         let commandData = Data([0x11, 0x01])
+        
+        
         peripheral.writeValue(commandData, for: fileControlChar, type: .withResponse)
         peripheral.readValue(for: fileDataChar)
     }
@@ -404,11 +411,16 @@ extension BLEFileTransferManager {
         }
     }
     
-    func commandWriteFileName(fileName: String) {
+    func commandWriteFileName(fileName: String, fileSize: Int) {
         guard let peripheral, let fileInfoChar else { return }
         
         fileTransferMode = .fileTransfer
         fileData.removeAll()
+        completedFileContextStr = ""
+        
+        totalChunks =  Int((fileSize + chunkSize - 1) / chunkSize)
+        print("==> App estimates has \(totalChunks) total chunks")
+        currentChunk = 0
         
         // Note: file_path + file_name, if file is at home, only need file_name
         guard let jsonData = fileName.data(using: .utf8) else { return }
@@ -426,30 +438,62 @@ extension BLEFileTransferManager {
     }
     
     func processFileDataChunk(_ data: Data) {
-        fileData.append(data)
-        guard let dataString = fileData.string else {
+        guard let dataString = data.string else {
             return
         }
-        print("Current buffer: \(dataString)")
         
-        // This marks the end of the file list data array
-        if dataString.contains("}}") {
-            print("Found complete JSON with closing brackets")
-            let completedDataString = dataString.removingNullBytes()
-            print("completed Data String: \(completedDataString)")
+        
+        
+        if dataString.contains("error") {
+//            guard let fileDataString = fileData.string else {
+//                return
+//            }
+//            print("Found complete JSON with closing brackets")
+//            let completedFileDataString = fileDataString.removingNullBytes()
+//            print("completed Data String: \(completedFileDataString)")
+            print("completed Data String: \(completedFileContextStr)")
             
-            // parse json
-            guard let commandData = parseFileDownloadDataJSON(jsonString: completedDataString) else { return }
-            print("parsed json: \(commandData)")
+//            // parse json
+//            guard let commandData = parseFileDownloadDataJSON(jsonString: completedFileDataString) else { return }
+//            print("parsed json: \(commandData)")
+            
+            totalChunks = -1
             // We got file data here (commandData) --> complete file download flow
             // TODO: Phuong please help the flow write to local
         } else {
-            commandRequestNextFileChunk()
+            print("==> [chunk \(currentChunk)] data: \(dataString)")
+            fileData.append(data)
+            
+            if dataString.contains("}}") {
+                // fileData.append(data)
+                
+                guard let fileDataString = fileData.string else {
+                    return
+                }
+                // This means end of completed 1 JSON
+                let completedFileDataString = fileDataString.removingNullBytes()
+                
+                guard let commandData = parseFileDownloadDataJSON(jsonString: completedFileDataString) else { return }
+                print("parsed json: \(commandData)")
+                
+                completedFileContextStr += commandData.data.content
+                
+                fileData.removeAll()
+            }
+            
+            currentChunk += 1
+            
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.1, execute: {
+                self.commandRequestNextFileChunk()
+            })
+            
         }
     }
     
     func parseFileDownloadDataJSON(jsonString: String) -> FileDownloadData? {
-        guard let jsonData = jsonString.data(using: .utf8) else {
+        guard let jsonData = jsonString
+            .replacingOccurrences(of: "\n", with: "")
+            .data(using: .utf8) else {
             print("Failed to convert string to data")
             return nil
         }
